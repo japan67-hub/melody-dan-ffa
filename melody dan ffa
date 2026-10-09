@@ -1,0 +1,745 @@
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local lp = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+local mouse = lp:GetMouse()
+
+local cfg = {
+    silentAim = true,
+    useKeybind = true,
+    silentAimKey = Enum.KeyCode.V,
+    uiToggleKey = Enum.KeyCode.RightControl,
+    silentAimHitChance = 100,
+    silentAimFOV = 150,
+    silentAimFOVShow = true, -- default on so you can see it
+    silentAimFOVFilled = false,
+    silentAimFOVOpacity = 0.2,
+    silentAimFOVColor = Color3.fromRGB(255, 182, 215),
+    
+    silentAimPart = "Head",
+    silentAimClosestPart = false,
+    
+    silentAimTeamCheck = false,
+    silentAimWallCheck = false,
+    silentAimMaxDist = 1000,
+    
+    silentAimPredX = 0,
+    silentAimPredY = 0,
+    
+    bypassRevolver = false,
+}
+
+local bodyPartsList = {
+    "Head", "UpperTorso", "HumanoidRootPart", "LowerTorso",
+    "LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+    "LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg",
+    "LeftLowerLeg", "RightLowerLeg", "LeftFoot", "RightFoot"
+}
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.Thickness = 1.5
+fovCircle.NumSides = 64
+fovCircle.Radius = cfg.silentAimFOV
+fovCircle.Color = cfg.silentAimFOVColor
+fovCircle.Filled = cfg.silentAimFOVFilled
+fovCircle.Visible = cfg.silentAimFOVShow
+fovCircle.Transparency = 1 - cfg.silentAimFOVOpacity
+
+local silentAimCachedPart = nil
+
+local function isHoldingRevolver()
+    if not cfg.bypassRevolver then return false end
+    local char = lp.Character
+    if not char then return false end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        local toolName = string.lower(tool.Name)
+        if string.find(toolName, "revolver") or string.find(toolName, "rev") then
+            return true
+        end
+    end
+    return false
+end
+
+local function getHum(p)
+    local c = p and p.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getHRP(p)
+    local c = p and p.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function isAlive(p)
+    local h = getHum(p)
+    return h and h.Health > 0
+end
+
+local function sameTeam(p)
+    return lp.Team and p.Team and lp.Team == p.Team
+end
+
+local function wallBetween(pos)
+    if not cfg.silentAimWallCheck then return false end
+    local ro = cam.CFrame.Position
+    local rd = pos - ro
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {lp.Character}
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local hit = workspace:Raycast(ro, rd, params)
+    if not hit then return false end
+    for _, p in pairs(Players:GetPlayers()) do
+        if p.Character and hit.Instance:IsDescendantOf(p.Character) then return false end
+    end
+    return true
+end
+
+local function safeWorldToViewportPoint(pos)
+    local sp, on = Vector3.new(), false
+    pcall(function()
+        sp, on = cam:WorldToViewportPoint(pos)
+    end)
+    return sp, on
+end
+
+local function getClosestBodyPart(char)
+    local closestPart, shortestDist = nil, math.huge
+    local mousePos = UIS:GetMouseLocation()
+    for _, pName in ipairs(bodyPartsList) do
+        local part = char:FindFirstChild(pName)
+        if part then
+            local screenPos, onScreen = safeWorldToViewportPoint(part.Position)
+            local dist = onScreen and (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude or math.huge
+            if dist < shortestDist then
+                shortestDist = dist
+                closestPart = part
+            end
+        end
+    end
+    return closestPart or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getTargetPart(char)
+    if not char then return nil end
+    if cfg.silentAimClosestPart then
+        return getClosestBodyPart(char)
+    end
+    return char:FindFirstChild(cfg.silentAimPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getClosestPlayerToCursor()
+    if isHoldingRevolver() then return nil end
+    
+    local closestPlayer = nil
+    local shortestDist = cfg.silentAimFOV
+    local mousePos = UIS:GetMouseLocation()
+
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= lp and isAlive(p) then
+            if cfg.silentAimTeamCheck and sameTeam(p) then continue end
+            local hrp = getHRP(p)
+            if hrp then
+                local dist3D = (hrp.Position - cam.CFrame.Position).Magnitude
+                if dist3D <= cfg.silentAimMaxDist then
+                    local sp, onScreen = safeWorldToViewportPoint(hrp.Position)
+                    if onScreen then
+                        local dist2D = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+                        if dist2D < shortestDist then
+                            local part = getTargetPart(p.Character)
+                            if part and not wallBetween(part.Position) then
+                                shortestDist = dist2D
+                                closestPlayer = part
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+-- HOOK
+local _grm = getrawmetatable(game)
+local _oldIndex = _grm.__index
+setreadonly(_grm, false)
+
+_grm.__index = function(self, key)
+    if not checkcaller() and self == mouse and cfg.silentAim and not isHoldingRevolver() then
+        if (key == "Hit" or key == "Target" or key == "UnitRay") and silentAimCachedPart then
+            if math.random(1, 100) <= cfg.silentAimHitChance then
+                local origin = cam.CFrame.Position
+                local hitPos = silentAimCachedPart.Position + Vector3.new(
+                    silentAimCachedPart.AssemblyLinearVelocity.X * cfg.silentAimPredX,
+                    silentAimCachedPart.AssemblyLinearVelocity.Y * cfg.silentAimPredY,
+                    silentAimCachedPart.AssemblyLinearVelocity.Z * cfg.silentAimPredX
+                )
+                if key == "UnitRay" then
+                    return Ray.new(origin, (hitPos - origin).Unit)
+                elseif key == "Hit" then
+                    return CFrame.new(hitPos)
+                elseif key == "Target" then
+                    return silentAimCachedPart
+                end
+            end
+        end
+    end
+    return _oldIndex(self, key)
+end
+setreadonly(_grm, true)
+
+RunService.RenderStepped:Connect(function()
+    local mousePos = UIS:GetMouseLocation()
+    fovCircle.Position = mousePos
+    fovCircle.Radius = cfg.silentAimFOV
+    fovCircle.Color = cfg.silentAimFOVColor
+    -- FIXED: FOV now shows independently of Silent Aim
+    fovCircle.Visible = cfg.silentAimFOVShow and not isHoldingRevolver()
+
+    if cfg.silentAim then
+        silentAimCachedPart = getClosestPlayerToCursor()
+    else
+        silentAimCachedPart = nil
+    end
+end)
+
+------------------------------------------------
+-- UI
+------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AngelsDanFFA"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+
+local success = pcall(function()
+    ScreenGui.Parent = CoreGui
+end)
+
+if not success or not ScreenGui.Parent then
+    ScreenGui.Parent = lp:WaitForChild("PlayerGui")
+end
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.ClipsDescendants = true
+Main.Size = UDim2.new(0, 480, 0, 575)
+Main.Position = UDim2.new(0.5, -240, 0.5, -287)
+Main.BackgroundColor3 = Color3.fromRGB(255, 240, 250)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = ScreenGui
+
+-- Dragging
+local dragging, dragInput, dragStart, startPos
+
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    local newX = startPos.X.Offset + delta.X
+    local newY = startPos.Y.Offset + delta.Y
+    
+    local viewport = cam.ViewportSize
+    newX = math.clamp(newX, 0, math.max(0, viewport.X - Main.AbsoluteSize.X))
+    newY = math.clamp(newY, 0, math.max(0, viewport.Y - Main.AbsoluteSize.Y))
+    
+    Main.Position = UDim2.new(0, newX, 0, newY)
+end
+
+Main.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+Main.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        dragInput = input
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        updateDrag(input)
+    end
+end)
+
+local UICorner = Instance.new("UICorner", Main)
+UICorner.CornerRadius = UDim.new(0, 22)
+
+local UIStroke = Instance.new("UIStroke", Main)
+UIStroke.Color = Color3.fromRGB(255, 170, 220)
+UIStroke.Thickness = 2.5
+
+-- Header
+local Header = Instance.new("Frame", Main)
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 52)
+Header.BackgroundTransparency = 1
+
+local Title = Instance.new("TextLabel", Header)
+Title.Size = UDim2.new(1, -50, 1, 0)
+Title.Position = UDim2.new(0, 18, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "♡ Angels Dan FFA ♡"
+Title.TextColor3 = Color3.fromRGB(220, 90, 160)
+Title.TextSize = 18
+Title.Font = Enum.Font.FredokaOne
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.TextYAlignment = Enum.TextYAlignment.Center
+Title.TextStrokeTransparency = 0.75
+Title.TextStrokeColor3 = Color3.fromRGB(255, 255, 255)
+
+local Subtitle = Instance.new("TextLabel", Header)
+Subtitle.Size = UDim2.new(1, -60, 0, 16)
+Subtitle.Position = UDim2.new(0, 20, 1, -18)
+Subtitle.BackgroundTransparency = 1
+Subtitle.Text = "⋆ ˚｡⋆ melody ⋆ ˚｡⋆"
+Subtitle.TextColor3 = Color3.fromRGB(200, 140, 180)
+Subtitle.Font = Enum.Font.GothamMedium
+Subtitle.TextSize = 11
+Subtitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local MinimizeBtn = Instance.new("TextButton", Header)
+MinimizeBtn.Size = UDim2.new(0, 28, 0, 28)
+MinimizeBtn.Position = UDim2.new(1, -38, 0.5, -14)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(255, 200, 230)
+MinimizeBtn.Text = "−"
+MinimizeBtn.TextColor3 = Color3.fromRGB(220, 80, 150)
+MinimizeBtn.Font = Enum.Font.FredokaOne
+MinimizeBtn.TextSize = 18
+MinimizeBtn.AutoButtonColor = false
+
+Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 10)
+
+-- Mini Bubble
+local MiniBubble = Instance.new("TextButton", ScreenGui)
+MiniBubble.Name = "MiniBubble"
+MiniBubble.Size = UDim2.new(0, 50, 0, 50)
+MiniBubble.Position = UDim2.new(0.5, -25, 0.5, -25)
+MiniBubble.BackgroundColor3 = Color3.fromRGB(255, 230, 245)
+MiniBubble.Text = "🪽"
+MiniBubble.TextSize = 22
+MiniBubble.Visible = false
+MiniBubble.Active = true
+
+local bDragging, bDragStart, bStartPos
+MiniBubble.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        bDragging = true
+        bDragStart = input.Position
+        bStartPos = MiniBubble.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                bDragging = false
+            end
+        end)
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if bDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - bDragStart
+        local newX = math.clamp(bStartPos.X.Offset + delta.X, 0, cam.ViewportSize.X - 50)
+        local newY = math.clamp(bStartPos.Y.Offset + delta.Y, 0, cam.ViewportSize.Y - 50)
+        MiniBubble.Position = UDim2.new(0, newX, 0, newY)
+    end
+end)
+
+Instance.new("UICorner", MiniBubble).CornerRadius = UDim.new(1, 0)
+
+local BubbleStroke = Instance.new("UIStroke", MiniBubble)
+BubbleStroke.Color = Color3.fromRGB(255, 160, 210)
+BubbleStroke.Thickness = 2.2
+
+-- Scroll
+local Scroll = Instance.new("ScrollingFrame", Main)
+Scroll.Size = UDim2.new(1, -24, 1, -62)
+Scroll.Position = UDim2.new(0, 12, 0, 52)
+Scroll.BackgroundTransparency = 1
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 4
+Scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 170, 215)
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local UIList = Instance.new("UIListLayout", Scroll)
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+UIList.Padding = UDim.new(0, 11)
+
+UIList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, UIList.AbsoluteContentSize.Y + 12)
+end)
+
+local function minimizeUI()
+    local x = math.clamp(Main.AbsolutePosition.X + (Main.AbsoluteSize.X / 2) - 25, 0, cam.ViewportSize.X - 50)
+    local y = math.clamp(Main.AbsolutePosition.Y + (Main.AbsoluteSize.Y / 2) - 25, 0, cam.ViewportSize.Y - 50)
+    MiniBubble.Position = UDim2.new(0, x, 0, y)
+    Main.Visible = false
+    MiniBubble.Visible = true
+end
+
+local function restoreUI()
+    local x = math.clamp(MiniBubble.AbsolutePosition.X - (Main.AbsoluteSize.X / 2) + 25, 0, cam.ViewportSize.X - Main.AbsoluteSize.X)
+    local y = math.clamp(MiniBubble.AbsolutePosition.Y - (Main.AbsoluteSize.Y / 2) + 25, 0, cam.ViewportSize.Y - Main.AbsoluteSize.Y)
+    Main.Position = UDim2.new(0, x, 0, y)
+    MiniBubble.Visible = false
+    Main.Visible = true
+end
+
+MinimizeBtn.MouseButton1Click:Connect(minimizeUI)
+MiniBubble.MouseButton1Click:Connect(restoreUI)
+
+-- Helpers
+local function createCard(height)
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, -8, 0, height or 42)
+    card.BackgroundColor3 = Color3.fromRGB(255, 248, 253)
+    card.BorderSizePixel = 0
+    card.Parent = Scroll
+    
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 14)
+    
+    local s = Instance.new("UIStroke", card)
+    s.Color = Color3.fromRGB(255, 210, 235)
+    s.Thickness = 1.2
+    return card
+end
+
+local function addToggle(text, default, callback)
+    local card = createCard(42)
+    local lbl = Instance.new("TextLabel", card)
+    lbl.Size = UDim2.new(0.7, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200, 80, 150)
+    lbl.Font = Enum.Font.FredokaOne
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btn = Instance.new("TextButton", card)
+    btn.Size = UDim2.new(0, 46, 0, 24)
+    btn.Position = UDim2.new(1, -56, 0.5, -12)
+    btn.BackgroundColor3 = default and Color3.fromRGB(255, 140, 200) or Color3.fromRGB(250, 230, 245)
+    btn.Text = ""
+    btn.AutoButtonColor = false
+
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+
+    local circle = Instance.new("Frame", btn)
+    circle.Size = UDim2.new(0, 20, 0, 20)
+    circle.Position = default and UDim2.new(1, -22, 0.5, -10) or UDim2.new(0, 2, 0.5, -10)
+    circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    
+    Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+
+    local state = default
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and Color3.fromRGB(255, 140, 200) or Color3.fromRGB(250, 230, 245)
+        circle:TweenPosition(state and UDim2.new(1, -22, 0.5, -10) or UDim2.new(0, 2, 0.5, -10), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.15, true)
+        callback(state)
+    end)
+end
+
+local function addSlider(text, min, max, default, callback)
+    local card = createCard(52)
+    
+    local lbl = Instance.new("TextLabel", card)
+    lbl.Size = UDim2.new(0.6, 0, 0, 20)
+    lbl.Position = UDim2.new(0, 12, 0, 5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200, 80, 150)
+    lbl.Font = Enum.Font.FredokaOne
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local valLbl = Instance.new("TextLabel", card)
+    valLbl.Size = UDim2.new(0.3, 0, 0, 20)
+    valLbl.Position = UDim2.new(0.7, -10, 0, 5)
+    valLbl.BackgroundTransparency = 1
+    valLbl.Text = tostring(default)
+    valLbl.TextColor3 = Color3.fromRGB(210, 120, 170)
+    valLbl.Font = Enum.Font.SourceSans
+    valLbl.TextSize = 14
+    valLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+    local bg = Instance.new("Frame", card)
+    bg.Size = UDim2.new(1, -24, 0, 9)
+    bg.Position = UDim2.new(0, 12, 0, 32)
+    bg.BackgroundColor3 = Color3.fromRGB(255, 225, 240)
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame", bg)
+    fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255, 140, 200)
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local sDragging = false
+    local function update(input)
+        local pos = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+        local val = math.floor(min + (max - min) * pos)
+        fill.Size = UDim2.new(pos, 0, 1, 0)
+        valLbl.Text = tostring(val)
+        callback(val)
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            sDragging = true
+            update(input)
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            sDragging = false
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(input)
+        if sDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            update(input)
+        end
+    end)
+end
+
+local function addDropdown(text, list, default, callback)
+    local card = createCard(42)
+    
+    local lbl = Instance.new("TextLabel", card)
+    lbl.Size = UDim2.new(0.4, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200, 80, 150)
+    lbl.Font = Enum.Font.FredokaOne
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btn = Instance.new("TextButton", card)
+    btn.Size = UDim2.new(0.55, 0, 0, 28)
+    btn.Position = UDim2.new(0.42, 0, 0.5, -14)
+    btn.BackgroundColor3 = Color3.fromRGB(255, 230, 245)
+    btn.Text = default
+    btn.TextColor3 = Color3.fromRGB(100, 140, 160)
+    btn.Font = Enum.Font.SourceSans
+    btn.TextSize = 14
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    local s = Instance.new("UIStroke", btn)
+    s.Color = Color3.fromRGB(255, 190, 225)
+
+    local dropFrame = Instance.new("ScrollingFrame", Scroll)
+    dropFrame.Size = UDim2.new(1, -6, 0, 120)
+    dropFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    dropFrame.Visible = false
+    dropFrame.BorderSizePixel = 0
+    dropFrame.ScrollBarThickness = 3
+    Instance.new("UICorner", dropFrame).CornerRadius = UDim.new(0, 10)
+    
+    local dList = Instance.new("UIListLayout", dropFrame)
+    dList.SortOrder = Enum.SortOrder.LayoutOrder
+
+    dList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        dropFrame.CanvasSize = UDim2.new(0, 0, 0, dList.AbsoluteContentSize.Y)
+    end)
+
+    for _, v in ipairs(list) do
+        local item = Instance.new("TextButton", dropFrame)
+        item.Size = UDim2.new(1, 0, 0, 26)
+        item.BackgroundTransparency = 1
+        item.Text = v
+        item.TextColor3 = Color3.fromRGB(210, 70, 150)
+        item.Font = Enum.Font.SourceSans
+        item.TextSize = 13
+        
+        item.MouseButton1Click:Connect(function()
+            btn.Text = v
+            dropFrame.Visible = false
+            callback(v)
+        end)
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        dropFrame.Visible = not dropFrame.Visible
+    end)
+end
+
+local function addKeybind(text, defaultKey, callback)
+    local card = createCard(42)
+    local lbl = Instance.new("TextLabel", card)
+    lbl.Size = UDim2.new(0.6, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200, 80, 150)
+    lbl.Font = Enum.Font.FredokaOne
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btn = Instance.new("TextButton", card)
+    btn.Size = UDim2.new(0, 84, 0, 26)
+    btn.Position = UDim2.new(1, -94, 0.5, -13)
+    btn.BackgroundColor3 = Color3.fromRGB(255, 230, 245)
+    btn.Text = defaultKey.Name
+    btn.TextColor3 = Color3.fromRGB(100, 140, 160)
+    btn.Font = Enum.Font.SourceSansBold
+    btn.TextSize = 12
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    local s = Instance.new("UIStroke", btn)
+    s.Color = Color3.fromRGB(255, 190, 225)
+
+    local listening = false
+    btn.MouseButton1Click:Connect(function()
+        listening = true
+        btn.Text = "..."
+    end)
+
+    UIS.InputBegan:Connect(function(input, gpe)
+        if listening and not gpe and input.UserInputType == Enum.UserInputType.Keyboard then
+            listening = false
+            btn.Text = input.KeyCode.Name
+            callback(input.KeyCode)
+        end
+    end)
+end
+
+local function addFOVColorPicker()
+    local card = createCard(155)
+
+    local title = Instance.new("TextLabel", card)
+    title.Size = UDim2.new(1, -20, 0, 24)
+    title.Position = UDim2.new(0, 12, 0, 5)
+    title.BackgroundTransparency = 1
+    title.Text = "♡ FOV Color"
+    title.TextColor3 = Color3.fromRGB(200, 80, 150)
+    title.Font = Enum.Font.FredokaOne
+    title.TextSize = 15
+    title.TextXAlignment = Enum.TextXAlignment.Left
+
+    local preview = Instance.new("Frame", card)
+    preview.Size = UDim2.new(0, 40, 0, 40)
+    preview.Position = UDim2.new(1, -52, 0, 6)
+    preview.BackgroundColor3 = cfg.silentAimFOVColor
+    Instance.new("UICorner", preview).CornerRadius = UDim.new(1, 0)
+
+    local function addRGBSlider(name, y, default, callback)
+        local lbl = Instance.new("TextLabel", card)
+        lbl.Size = UDim2.new(0, 28, 0, 20)
+        lbl.Position = UDim2.new(0, 12, 0, y)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = name
+        lbl.TextColor3 = Color3.fromRGB(200, 80, 150)
+        lbl.Font = Enum.Font.FredokaOne
+        lbl.TextSize = 13
+
+        local bg = Instance.new("Frame", card)
+        bg.Size = UDim2.new(1, -95, 0, 8)
+        bg.Position = UDim2.new(0, 42, 0, y + 6)
+        bg.BackgroundColor3 = Color3.fromRGB(255, 225, 240)
+        Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+        local fill = Instance.new("Frame", bg)
+        fill.Size = UDim2.new(default / 255, 0, 1, 0)
+        fill.BackgroundColor3 = Color3.fromRGB(255, 140, 200)
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+        local value = Instance.new("TextLabel", card)
+        value.Size = UDim2.new(0, 38, 0, 20)
+        value.Position = UDim2.new(1, -48, 0, y)
+        value.BackgroundTransparency = 1
+        value.Text = tostring(default)
+        value.TextColor3 = Color3.fromRGB(210, 120, 170)
+        value.Font = Enum.Font.SourceSans
+        value.TextSize = 13
+        value.TextXAlignment = Enum.TextXAlignment.Right
+
+        local dragging = false
+
+        local function update(input)
+            local pos = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+            local val = math.floor(pos * 255 + 0.5)
+            fill.Size = UDim2.new(pos, 0, 1, 0)
+            value.Text = tostring(val)
+            callback(val)
+        end
+
+        bg.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                update(input)
+            end
+        end)
+
+        UIS.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+
+        UIS.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                update(input)
+            end
+        end)
+    end
+
+    local r = math.floor(cfg.silentAimFOVColor.R * 255 + 0.5)
+    local g = math.floor(cfg.silentAimFOVColor.G * 255 + 0.5)
+    local b = math.floor(cfg.silentAimFOVColor.B * 255 + 0.5)
+
+    local rv, gv, bv = r, g, b
+
+    local function updateColor()
+        cfg.silentAimFOVColor = Color3.fromRGB(rv, gv, bv)
+        preview.BackgroundColor3 = cfg.silentAimFOVColor
+    end
+
+    addRGBSlider("R", 40, r, function(v) rv = v; updateColor() end)
+    addRGBSlider("G", 72, g, function(v) gv = v; updateColor() end)
+    addRGBSlider("B", 104, b, function(v) bv = v; updateColor() end)
+end
+
+-- Add all controls
+addToggle("Silent Aim", cfg.silentAim, function(v) cfg.silentAim = v end)
+addToggle("Show FOV Circle", cfg.silentAimFOVShow, function(v) cfg.silentAimFOVShow = v end)
+addSlider("FOV Radius", 10, 500, cfg.silentAimFOV, function(v) cfg.silentAimFOV = v end)
+
+addFOVColorPicker()
+
+addToggle("Bypass Revolver", cfg.bypassRevolver, function(v) cfg.bypassRevolver = v end)
+addToggle("Wall Check", cfg.silentAimWallCheck, function(v) cfg.silentAimWallCheck = v end)
+addToggle("Target Closest Part", cfg.silentAimClosestPart, function(v) cfg.silentAimClosestPart = v end)
+addDropdown("HitPart (16 Parts)", bodyPartsList, cfg.silentAimPart, function(v) cfg.silentAimPart = v end)
+addToggle("Enable Keybind", cfg.useKeybind, function(v) cfg.useKeybind = v end)
+addKeybind("Toggle Aim Key", cfg.silentAimKey, function(v) cfg.silentAimKey = v end)
+addKeybind("Hide/Show UI Key", cfg.uiToggleKey, function(v) cfg.uiToggleKey = v end)
+
+-- Keybinds
+UIS.InputBegan:Connect(function(i, gpe)
+    if gpe then return end
+    
+    if cfg.useKeybind and i.KeyCode == cfg.silentAimKey then
+        cfg.silentAim = not cfg.silentAim
+    end
+    
+    if i.KeyCode == cfg.uiToggleKey then
+        ScreenGui.Enabled = not ScreenGui.Enabled
+    end
+end)
+
+print("♡ Angels Dan FFA loaded successfully ♡")
